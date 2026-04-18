@@ -7,22 +7,19 @@ PORT = "COM8"
 BAUD = 115200
 
 connected_clients = set()
-serial_port = None
+serial_port = None  # shared serial reference so handler can write to it
 
 async def handler(ws):
     print("Dashboard connected")
     connected_clients.add(ws)
     try:
         async for message in ws:
-            # Forward motor commands from dashboard back to ESP32
-            try:
-                cmd = json.loads(message)
-                if "motor" in cmd and serial_port and serial_port.is_open:
-                    angle = cmd["motor"]
-                    serial_port.write(f"MOTOR:{angle}\n".encode())
-                    print(f"Motor command sent: {angle}°")
-            except Exception as e:
-                print(f"Command error: {e}")
+            # Forward any command from dashboard straight to ESP32 over serial
+            if serial_port and serial_port.is_open:
+                serial_port.write((message.strip() + "\n").encode("utf-8"))
+                print(f"Sent to ESP32: {message.strip()}")
+    except websockets.exceptions.ConnectionClosedError:
+        pass
     finally:
         connected_clients.discard(ws)
         print("Dashboard disconnected")
