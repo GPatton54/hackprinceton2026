@@ -1,70 +1,139 @@
-# Getting Started with Create React App
+# WaterShield Alerts
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+> Real-time iMessage alerts for a dual-sensor water leak detection system, built on [Photon Spectrum](https://photon.codes/spectrum).
 
-## Available Scripts
+When the WaterShield hardware detects abnormal water flow, this service sends a severity-aware iMessage to your phone — so you know about a leak before it floods your basement.
 
-In the project directory, you can run:
+## What it does
 
-### `npm start`
+- Connects to the ESP32 sensor bridge over WebSocket (`ws://localhost:8765`)
+- Runs a dual-sensor flow-difference anomaly detector (same logic as the live dashboard)
+- Classifies events into three severities: `LEAK_LOW`, `LEAK_HIGH`, `BURST`
+- Sends severity-specific iMessages via Photon Spectrum
+- Per-severity cooldown (default 30s) to prevent spam
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+## Architecture
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+```
+┌──────────┐   serial   ┌─────────────────┐   WebSocket   ┌──────────────┐   Spectrum   ┌───────┐
+│  ESP32   │ ─────────► │ serial_bridge.py│ ────────────► │leak-alerts.js│ ───────────► │ Your  │
+│ sensors  │    USB     │  (Python host)  │  localhost    │   (Node.js)  │   iMessage   │ phone │
+└──────────┘            └─────────────────┘    :8765      └──────────────┘              └───────┘
+```
 
-### `npm test`
+The same WebSocket feeds the React dashboard, so the alerts service runs in parallel without touching the existing stack.
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+## Severity rules
 
-### `npm run build`
+| Category | Trigger | Example message |
+|---|---|---|
+| `LEAK_LOW` | Flow diff > 0.3 L/min, risk score < 60% | 💧 Possible leak — monitoring |
+| `LEAK_HIGH` | Flow diff > 0.3 L/min, risk score ≥ 60% | ⚠️ Leak confirmed — recommend inspection |
+| `BURST` | Sensor spike > 2× rolling average | 🚨 Burst detected — valve closing |
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+Thresholds are defined at the top of `leak-alerts.js` and match the dashboard's `assessRisk()` function.
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+## Setup
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+### Prerequisites
 
-### `npm run eject`
+- Node.js 18+
+- A [Photon](https://photon.codes) account with iMessage provider configured and an agent number
+- Your ESP32 + `serial_bridge.py` running (or `fake-bridge.js` for testing)
 
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
+### Install
 
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
+```bash
+git clone https://github.com/YOUR-USERNAME/watershield-alerts.git
+cd watershield-alerts
+npm install
+```
 
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
+### Configure
 
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
+Copy the example env file and fill in your Photon credentials:
 
-## Learn More
+```bash
+cp .env.example .env
+```
 
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
+Edit `.env`:
 
-To learn React, check out the [React documentation](https://reactjs.org/).
+```
+PHOTON_PROJECT_ID=your-project-id
+PHOTON_SECRET=sve_your_secret_here
+```
 
-### Code Splitting
+> ⚠️ Never commit `.env` — it's already in `.gitignore`.
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
+### Run
 
-### Analyzing the Bundle Size
+```bash
+npm start
+```
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
+On first run, text your Photon iMessage agent from your phone. You'll get back `🔒 WaterShield is armed.` — now alerts are active.
 
-### Making a Progressive Web App
+## Testing without hardware
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
+A fake bridge that simulates sensor data is included:
 
-### Advanced Configuration
+```bash
+# Terminal 1 — simulate a steady leak
+node fake-bridge.js leak
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
+# Terminal 2 — run the alert service
+npm start
+```
 
-### Deployment
+Scenarios: `normal`, `leak`, `burst`.
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
+## Configuration
 
-### `npm run build` fails to minify
+Edit these constants at the top of `leak-alerts.js`:
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+| Constant | Default | Purpose |
+|---|---|---|
+| `BRIDGE_URL` | `ws://localhost:8765` | Where to find the sensor WebSocket |
+| `COOLDOWN_SECONDS` | `30` | Min seconds between repeat alerts of same severity |
+| `DIFF_WARN` | `0.3` | Flow diff (L/min) to enter LEAK state |
+| `DIFF_ALERT` | `0.5` | Flow diff (L/min) for higher urgency |
+| `BURST_RATIO` | `2.0` | Rolling-avg multiplier that counts as a burst |
+
+## Platform swap
+
+Spectrum supports Telegram, WhatsApp, Slack, Discord, and more. To swap iMessage for Telegram, change two lines:
+
+```javascript
+import { telegram } from "spectrum-ts/providers/telegram";
+// ...
+providers: [telegram.config()],
+```
+
+And enable Telegram in your Photon dashboard.
+
+## File map
+
+```
+watershield-alerts/
+├── leak-alerts.js       # Main service: WebSocket → severity check → Spectrum send
+├── fake-bridge.js       # Simulator for testing without hardware
+├── package.json
+├── .env.example         # Template for your Photon credentials
+├── .gitignore
+└── README.md
+```
+
+## Troubleshooting
+
+**"No alerts ever fire"** → You need to text your Photon agent first. The script only knows where to send once you've initiated a conversation.
+
+**"Invalid credentials"** → Check your `PHOTON_SECRET` in `.env` — it should start with `sve_`. Rotate it on the Photon dashboard if unsure.
+
+**"Bridge disconnected"** → `serial_bridge.py` isn't running, or nothing is on port 8765. For testing without hardware, run `fake-bridge.js` first.
+
+**Messages arrive hours late** → Check your phone's iMessage settings; the message is sent instantly by Spectrum.
+
+## License
+
+MIT
