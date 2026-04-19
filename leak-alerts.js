@@ -1,9 +1,4 @@
 // leak-alerts.js
-//
-// Listens to the same WebSocket the dashboard uses, runs the severity
-// detection from the dashboard, and sends iMessages via Photon Spectrum
-// when a leak or burst is detected. Severity-aware messages with per-
-// category cooldown to prevent spam.
 
 import "dotenv/config";
 import { Spectrum } from "spectrum-ts";
@@ -16,67 +11,36 @@ const PHOTON_PROJECT_ID = process.env.PHOTON_PROJECT_ID;
 const PHOTON_SECRET     = process.env.PHOTON_SECRET;
 const COOLDOWN_SECONDS  = parseInt(process.env.COOLDOWN_SECONDS || "30", 10);
 
-// ─── SEVERITY LOGIC (mirrors the dashboard's assessRisk) ────────────────────
-const DIFF_WARN   = 0.3;    // L/min — enter LEAK state
-const DIFF_ALERT  = 0.5;    // L/min — higher urgency leak
-const DIFF_MAX    = 1.0;    // L/min — score saturation point
-const RISK_BOOST  = 2.0;    // score multiplier
-const BURST_RATIO = 2.0;    // sensor spike threshold (x rolling avg)
-const AVG_ALPHA   = 0.1;    // EMA smoothing factor
+// ─── THRESHOLDS ──────────────────────────────────────────────────────────────
+const DIFF_WARN  = 0.2;
+const DIFF_ALERT = 0.4;
 
-let avgLpm1 = null, avgLpm2 = null;
-
+// ─── SEVERITY LOGIC ──────────────────────────────────────────────────────────
 function assessRisk(lpm1, lpm2) {
   const diff = Math.abs(lpm1 - lpm2);
-
-  if (avgLpm1 === null) { avgLpm1 = lpm1; avgLpm2 = lpm2; }
-  else {
-    avgLpm1 = AVG_ALPHA * lpm1 + (1 - AVG_ALPHA) * avgLpm1;
-    avgLpm2 = AVG_ALPHA * lpm2 + (1 - AVG_ALPHA) * avgLpm2;
-  }
-
-  let leak = 0, burst = 0, rawScore = 0;
-  if (diff > DIFF_ALERT)     { leak = 2; rawScore = diff / DIFF_MAX; }
-  else if (diff > DIFF_WARN) { leak = 1; rawScore = diff / DIFF_MAX; }
-
-  const spike1 = avgLpm1 > 0.05 && lpm1 > avgLpm1 * BURST_RATIO;
-  const spike2 = avgLpm2 > 0.05 && lpm2 > avgLpm2 * BURST_RATIO;
-  if (spike1 || spike2) { burst = 1; rawScore = 1.0; }
-
-  const score = Math.min(1.0, rawScore * RISK_BOOST);
-
   let label = "NORMAL";
-  if (burst)          label = "BURST_DETECTED";
-  else if (leak >= 1) label = "LEAK_DETECTED";
-
-  return { score, label, diff };
+  if (diff > DIFF_ALERT)     label = "BURST_DETECTED";
+  else if (diff > DIFF_WARN) label = "LEAK_DETECTED";
+  return { diff, label };
 }
 
-// ─── THREE-TIER ALERT CATEGORY ───────────────────────────────────────────────
-function categorize(label, score) {
+function categorize(label) {
   if (label === "BURST_DETECTED") return "BURST";
-  if (label === "LEAK_DETECTED" && score >= 0.6) return "LEAK_HIGH";
-  if (label === "LEAK_DETECTED") return "LEAK_LOW";
+  if (label === "LEAK_DETECTED")  return "LEAK";
   return "NORMAL";
 }
 
-function buildMessage(category, diff, score) {
-  const pct = Math.round(score * 100);
+function buildMessage(category, diff) {
   const d = diff.toFixed(2);
   switch (category) {
-    case "BURST":
-      return `🚨 BURST DETECTED\nSensor flow spike (ΔQ ${d} L/min, risk ${pct}%). Valve closing — check immediately.`;
-    case "LEAK_HIGH":
-      return `⚠️ Leak confirmed\nΔQ ${d} L/min, risk ${pct}%. Recommend immediate inspection.`;
-    case "LEAK_LOW":
-      return `💧 Possible leak\nΔQ ${d} L/min, risk ${pct}%. Flow above baseline — monitoring.`;
-    default:
-      return null;
+    case "BURST": return `🚨 BURST DETECTED\nΔQ ${d} L/min — major flow difference detected. The valve has been closed. Check piping immediately.`;
+    case "LEAK":  return `⚠️ Leak detected\nΔQ ${d} L/min — flow difference above threshold. Go check piping for a leak.`;
+    default: return null;
   }
 }
 
 // ─── COOLDOWN ────────────────────────────────────────────────────────────────
-const lastSentAt = { BURST: 0, LEAK_HIGH: 0, LEAK_LOW: 0 };
+const lastSentAt = { BURST: 0, LEAK: 0 };
 const shouldSend = (c) => (Date.now() / 1000 - lastSentAt[c]) >= COOLDOWN_SECONDS;
 const markSent   = (c) => { lastSentAt[c] = Date.now() / 1000; };
 
@@ -96,10 +60,7 @@ const app = await Spectrum({
 });
 console.log("✅ Spectrum connected\n");
 
-// ─── CAPTURE ALERT DESTINATION FROM INCOMING MESSAGE ─────────────────────────
-// Spectrum can only send into spaces it knows about (i.e. someone messaged
-// the agent first). We listen for the first incoming message and lock that
-// space as our alert destination.
+// ─── CAPTURE ALERT DESTINATION ───────────────────────────────────────────────
 let alertSpace = null;
 
 console.log("👋 Text your Photon agent from your iPhone now to arm alerts.");
@@ -117,28 +78,60 @@ console.log("   (Any message works — we just need a conversation to reply into
         console.error("Failed to send acknowledgement:", err.message);
       }
     }
-    // Ignore further incoming messages — this is a one-way alert system.
   }
 })();
 
 // ─── CONNECT TO SENSOR BRIDGE ────────────────────────────────────────────────
+let warmedUp = false;
+let burstAlertSent = false;
+
 function connect() {
   const ws = new WebSocket(BRIDGE_URL);
 
-  ws.on("open",  () => console.log(`✅ Connected to sensor bridge at ${BRIDGE_URL}`));
+  ws.on("open", () => {
+    console.log(`✅ Connected to sensor bridge at ${BRIDGE_URL}`);
+    warmedUp = false;
+    burstAlertSent = false;
+    setTimeout(() => {
+      warmedUp = true;
+      console.log("✅ Warmup done — monitoring active.");
+    }, 5000);
+  });
+
   ws.on("error", (err) => console.error(`Bridge error: ${err.message}`));
+
   ws.on("close", () => {
     console.log("Bridge disconnected. Retrying in 2s...");
     setTimeout(connect, 2000);
   });
 
   ws.on("message", async (raw) => {
+    if (!warmedUp) return;
+
     let r;
     try { r = JSON.parse(raw.toString()); } catch { return; }
+
+    // Listen for valve unlock — reset burst flag so alerts can fire again
+    if (r.event === "valve" && r.action === "unlocked") {
+      burstAlertSent = false;
+      console.log("🔓 Valve unlocked — burst alert reset, monitoring resumed.");
+      if (alertSpace) {
+        try {
+          await app.send(alertSpace, "🔓 Valve has been reopened. WaterShield is monitoring again.");
+        } catch (err) {
+          console.error("Failed to send unlock notification:", err.message);
+        }
+      }
+      return;
+    }
+
+    // Block all messages after a burst until valve is reopened
+    if (burstAlertSent) return;
+
     if (typeof r.lpm1 !== "number" || typeof r.lpm2 !== "number") return;
 
-    const { score, label, diff } = assessRisk(r.lpm1, r.lpm2);
-    const category = categorize(label, score);
+    const { diff, label } = assessRisk(r.lpm1, r.lpm2);
+    const category = categorize(label);
 
     if (category === "NORMAL") return;
     if (!shouldSend(category)) return;
@@ -148,16 +141,18 @@ function connect() {
       return;
     }
 
-    const text = buildMessage(category, diff, score);
+    const text = buildMessage(category, diff);
     if (!text) return;
 
     try {
       await app.send(alertSpace, text);
       markSent(category);
-      console.log(
-        `[${new Date().toLocaleTimeString()}] ${category} → sent ` +
-        `(ΔQ ${diff.toFixed(2)}, risk ${Math.round(score * 100)}%)`
-      );
+      console.log(`[${new Date().toLocaleTimeString()}] ${category} → sent (ΔQ ${diff.toFixed(2)})`);
+
+      if (category === "BURST") {
+        burstAlertSent = true;
+        console.log("🔒 Burst sent — all alerts paused until valve is unlocked.");
+      }
     } catch (err) {
       console.error(`❌ Send failed:`, err.message);
     }
@@ -167,7 +162,6 @@ function connect() {
 connect();
 console.log(`📡 Watching ${BRIDGE_URL} — Ctrl+C to stop.\n`);
 
-// Graceful shutdown
 process.on("SIGINT", async () => {
   console.log("\nShutting down...");
   await app.stop();

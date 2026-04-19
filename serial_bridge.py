@@ -7,14 +7,13 @@ PORT = "COM8"
 BAUD = 115200
 
 connected_clients = set()
-serial_port = None  # shared serial reference so handler can write to it
+serial_port = None
 
 async def handler(ws):
     print("Dashboard connected")
     connected_clients.add(ws)
     try:
         async for message in ws:
-            # Forward any command from dashboard straight to ESP32 over serial
             if serial_port and serial_port.is_open:
                 serial_port.write((message.strip() + "\n").encode("utf-8"))
                 print(f"Sent to ESP32: {message.strip()}")
@@ -34,7 +33,7 @@ async def read_serial():
         line = line.decode("utf-8", errors="ignore").strip()
         if line.startswith("{"):
             try:
-                json.loads(line)  # validate
+                json.loads(line)
                 if connected_clients:
                     await asyncio.gather(*[ws.send(line) for ws in connected_clients])
             except:

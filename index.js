@@ -1,7 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import * as Recharts from 'recharts';
-import PipeHealthDashboard from './PipeHealthDashboard';
+import PipeHealthDashboard from './App';
 
 window.React = React;
 window.Recharts = Recharts;

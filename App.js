@@ -4,23 +4,18 @@ import * as Recharts from 'recharts';
 const { useState, useEffect } = React;
 const { LineChart, Line, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } = Recharts;
 
-// ── Thresholds ────────────────────────────────────────────────────────────────
-const DIFF_WARN  = 0.2;   // L/min diff → leak detected
-const DIFF_ALERT = 0.4;   // L/min diff → burst detected
-const DIFF_MAX   = 0.8;   // graph Y ceiling
+const DIFF_WARN  = 0.2;
+const DIFF_ALERT = 0.4;
+const DIFF_MAX   = 0.8;
 
-// ── Risk assessment ───────────────────────────────────────────────────────────
 function assessRisk(lpm1, lpm2) {
   const diff = Math.abs(lpm1 - lpm2);
-
   let label = "NORMAL";
   if (diff > DIFF_ALERT)     label = "BURST_DETECTED";
   else if (diff > DIFF_WARN) label = "LEAK_DETECTED";
-
   return { diff, label };
 }
 
-// ── Styling helpers ───────────────────────────────────────────────────────────
 function statusColor(l) {
   if (l === "BURST_DETECTED") return "#e24b4a";
   if (l === "LEAK_DETECTED")  return "#ef9f27";
@@ -37,7 +32,6 @@ function riskLabel(l) {
   return { NORMAL: "Normal", LEAK_DETECTED: "Leak detected", BURST_DETECTED: "Burst detected" }[l] || l;
 }
 
-// ── Dashboard ─────────────────────────────────────────────────────────────────
 export default function PipeHealthDashboard() {
   const [readings, setReadings]       = useState([]);
   const [alerts, setAlerts]           = useState([]);
@@ -48,14 +42,12 @@ export default function PipeHealthDashboard() {
   const closeValve = () => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send("VALVE:CLOSE");
-      setValveClosed(true);
     }
   };
 
   const unlockValve = () => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send("VALVE:UNLOCK");
-      setValveClosed(false);
     }
   };
 
@@ -64,7 +56,7 @@ export default function PipeHealthDashboard() {
   useEffect(() => {
     let ws;
     function connect() {
-      ws = new WebSocket("wss://corny-polymer-mourner.ngrok-free.dev");
+      ws = new WebSocket("ws://localhost:8765");
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -76,12 +68,14 @@ export default function PipeHealthDashboard() {
         try {
           const r = JSON.parse(e.data);
 
+          // Update valve state from ESP32 — source of truth
           if (r.valveClosed !== undefined) setValveClosed(r.valveClosed);
           if (r.event === "valve" && r.action === "unlocked") setValveClosed(false);
+          if (r.event === "valve" && r.action === "closed")   setValveClosed(true);
+
           if (r.lpm1 === undefined) return;
 
           const risk = assessRisk(r.lpm1, r.lpm2);
-
           const reading = {
             lpm1:  r.lpm1,
             lpm2:  r.lpm2,
@@ -139,8 +133,6 @@ export default function PipeHealthDashboard() {
           <p style={{ margin: 0, fontSize: 20, fontWeight: 500 }}>Live sensor dashboard</p>
         </div>
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-
-          {/* Valve status badge */}
           <span style={{
             fontSize: 15, padding: "7px 16px", borderRadius: 20,
             background: valveClosed ? "rgba(226,75,74,0.10)" : "rgba(29,158,117,0.10)",
@@ -151,7 +143,6 @@ export default function PipeHealthDashboard() {
             {valveClosed ? "🔒 Valve closed" : "✅ Valve open"}
           </span>
 
-          {/* Unlock button — only when valve is closed */}
           {valveClosed && (
             <button onClick={unlockValve} style={{
               fontSize: 15, padding: "7px 18px", borderRadius: 20, cursor: "pointer",
@@ -162,7 +153,6 @@ export default function PipeHealthDashboard() {
             </button>
           )}
 
-          {/* Manual close button — only when valve is open */}
           {!valveClosed && (
             <button onClick={closeValve} style={{
               fontSize: 15, padding: "7px 18px", borderRadius: 20, cursor: "pointer",
@@ -173,7 +163,6 @@ export default function PipeHealthDashboard() {
             </button>
           )}
 
-          {/* Connection badge */}
           <span style={{
             fontSize: 15, padding: "7px 16px", borderRadius: 20,
             background: connected ? "rgba(29,158,117,0.10)" : "rgba(226,75,74,0.10)",
@@ -186,22 +175,18 @@ export default function PipeHealthDashboard() {
         </div>
       </div>
 
-      {/* No data banner */}
       {readings.length === 0 && (
         <div style={{ padding: 16, marginBottom: 16, borderRadius: 8, background: "rgba(239,159,39,0.10)", border: "1px solid #ef9f2740", fontSize: 13, color: "#ba7517" }}>
           Waiting for data from ESP32… Make sure serial_bridge.py is running and the board is connected.
         </div>
       )}
 
-      {/* Active alert banner */}
       {showBanner && (
         <div style={{ padding: "12px 16px", marginBottom: 14, borderRadius: 8, background: bg, border: `1px solid ${col}40`, display: "flex", alignItems: "center", gap: 10 }}>
           <span style={{ fontSize: 18 }}>{latest.label === "BURST_DETECTED" ? "💥" : "⚠️"}</span>
           <div>
             <p style={{ margin: 0, fontWeight: 600, color: col, fontSize: 14 }}>{riskLabel(latest.label)}</p>
-            <p style={{ margin: 0, fontSize: 12, color: "#666" }}>
-              Flow diff: {latest.diff?.toFixed(3)} L/min
-            </p>
+            <p style={{ margin: 0, fontSize: 12, color: "#666" }}>Flow diff: {latest.diff?.toFixed(3)} L/min</p>
           </div>
         </div>
       )}
@@ -225,9 +210,7 @@ export default function PipeHealthDashboard() {
       <div style={{ background: "#fff", border: "1px solid #e5e5e5", borderRadius: 10, padding: "14px 16px", marginBottom: 16 }}>
         <p style={{ margin: "0 0 12px", fontSize: 12, fontWeight: 500, color: "#555", textTransform: "uppercase" }}>Flow rates</p>
         {readings.length === 0 ? (
-          <div style={{ height: 200, display: "flex", alignItems: "center", justifyContent: "center", color: "#aaa", fontSize: 13 }}>
-            No data yet — waiting for ESP32
-          </div>
+          <div style={{ height: 200, display: "flex", alignItems: "center", justifyContent: "center", color: "#aaa", fontSize: 13 }}>No data yet — waiting for ESP32</div>
         ) : (
           <ResponsiveContainer width="100%" height={200}>
             <LineChart data={readings} margin={{ top: 4, right: 8, bottom: 0, left: -20 }}>
@@ -251,9 +234,7 @@ export default function PipeHealthDashboard() {
       <div style={{ background: "#fff", border: "1px solid #e5e5e5", borderRadius: 10, padding: "14px 16px", marginBottom: 16 }}>
         <p style={{ margin: "0 0 12px", fontSize: 12, fontWeight: 500, color: "#555", textTransform: "uppercase" }}>Flow difference</p>
         {readings.length === 0 ? (
-          <div style={{ height: 160, display: "flex", alignItems: "center", justifyContent: "center", color: "#aaa", fontSize: 13 }}>
-            No data yet — waiting for ESP32
-          </div>
+          <div style={{ height: 160, display: "flex", alignItems: "center", justifyContent: "center", color: "#aaa", fontSize: 13 }}>No data yet — waiting for ESP32</div>
         ) : (
           <ResponsiveContainer width="100%" height={160}>
             <AreaChart data={readings} margin={{ top: 4, right: 90, bottom: 0, left: -20 }}>
@@ -292,15 +273,12 @@ export default function PipeHealthDashboard() {
               <span style={{ background: statusBg(a.label), color: statusColor(a.label), padding: "2px 8px", borderRadius: 4, fontWeight: 500, fontSize: 11 }}>
                 {riskLabel(a.label)}
               </span>
-              <span style={{ color: "#888", marginLeft: "auto" }}>
-                ΔQ: {a.diff.toFixed(3)} L/min
-              </span>
+              <span style={{ color: "#888", marginLeft: "auto" }}>ΔQ: {a.diff.toFixed(3)} L/min</span>
             </div>
           ))
         }
       </div>
 
-      {/* Threshold legend */}
       <div style={{ marginTop: 12, padding: "10px 14px", borderRadius: 8, background: "#f9f9f9", border: "1px solid #e5e5e5", fontSize: 11, color: "#888" }}>
         Thresholds — leak: ΔQ &gt; {DIFF_WARN} L/min &nbsp;·&nbsp; burst: ΔQ &gt; {DIFF_ALERT} L/min
       </div>
