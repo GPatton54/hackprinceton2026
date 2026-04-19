@@ -4,48 +4,20 @@ import * as Recharts from 'recharts';
 const { useState, useEffect } = React;
 const { LineChart, Line, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } = Recharts;
 
-// ── Thresholds — keep in sync with LeakDetector.ino ──────────────────────────
-const DIFF_WARN   = 0.1;   // L/min diff → leak detected
-const DIFF_ALERT  = 0.3;   // L/min diff → burst detected
-const DIFF_MAX    = 0.6;   // graph Y ceiling
-const FLOW_HIGH   = 5.0;   // L/min absolute → contributes to risk score
-const RISK_BOOST  = 2.0;
-const BURST_RATIO = 2.0;
+// ── Thresholds ────────────────────────────────────────────────────────────────
+const DIFF_WARN  = 0.2;   // L/min diff → leak detected
+const DIFF_ALERT = 0.4;   // L/min diff → burst detected
+const DIFF_MAX   = 0.8;   // graph Y ceiling
 
-let avgLpm1 = null, avgLpm2 = null;
-const AVG_ALPHA = 0.1;
-
-// ── Risk assessment (mirrors Arduino logic) ───────────────────────────────────
+// ── Risk assessment ───────────────────────────────────────────────────────────
 function assessRisk(lpm1, lpm2) {
   const diff = Math.abs(lpm1 - lpm2);
 
-  if (avgLpm1 === null) { avgLpm1 = lpm1; avgLpm2 = lpm2; }
-  else {
-    avgLpm1 = AVG_ALPHA * lpm1 + (1 - AVG_ALPHA) * avgLpm1;
-    avgLpm2 = AVG_ALPHA * lpm2 + (1 - AVG_ALPHA) * avgLpm2;
-  }
-
-  let leak = 0, burst = 0, rawScore = 0;
-
-  if (diff > DIFF_ALERT)     { leak = 2; rawScore = diff / DIFF_MAX; }
-  else if (diff > DIFF_WARN) { leak = 1; rawScore = diff / DIFF_MAX; }
-
-  // Absolute flow rate also contributes — high flow on either sensor raises risk
-  const flowScore = Math.max(lpm1, lpm2) / FLOW_HIGH;
-  rawScore = Math.max(rawScore, Math.min(0.5, flowScore));  // flow alone caps at 50%
-
-  const spike1 = avgLpm1 > 0.05 && lpm1 > avgLpm1 * BURST_RATIO;
-  const spike2 = avgLpm2 > 0.05 && lpm2 > avgLpm2 * BURST_RATIO;
-  if (spike1 || spike2) { burst = 1; rawScore = 1.0; }
-
-  const score = Math.min(1.0, rawScore * RISK_BOOST);
-
   let label = "NORMAL";
-  if (burst)        label = "BURST_DETECTED";
-  else if (leak === 2) label = "BURST_DETECTED";
-  else if (leak === 1) label = "LEAK_DETECTED";
+  if (diff > DIFF_ALERT)     label = "BURST_DETECTED";
+  else if (diff > DIFF_WARN) label = "LEAK_DETECTED";
 
-  return { score, leak, burst, label, diff };
+  return { diff, label };
 }
 
 // ── Styling helpers ───────────────────────────────────────────────────────────
@@ -65,22 +37,20 @@ function riskLabel(l) {
   return { NORMAL: "Normal", LEAK_DETECTED: "Leak detected", BURST_DETECTED: "Burst detected" }[l] || l;
 }
 
-// Custom dot — only renders at elevated risk
-function AlertDot(props) {
-  const { cx, cy, payload } = props;
-  if (!payload || payload.score < 0.1) return null;
-  const color = payload.score >= 0.6 ? "#e24b4a" : "#ef9f27";
-  return <circle cx={cx} cy={cy} r={4} fill={color} stroke="#fff" strokeWidth={1.5} />;
-}
-
 // ── Dashboard ─────────────────────────────────────────────────────────────────
 export default function PipeHealthDashboard() {
-  const [readings, setReadings]     = useState([]);
-  const [alerts, setAlerts]         = useState([]);
-  const [connected, setConnected]   = useState(false);
-  const [activeTab, setActiveTab]   = useState("flow");
+  const [readings, setReadings]       = useState([]);
+  const [alerts, setAlerts]           = useState([]);
+  const [connected, setConnected]     = useState(false);
   const [valveClosed, setValveClosed] = useState(false);
   const wsRef = React.useRef(null);
+
+  const closeValve = () => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send("VALVE:CLOSE");
+      setValveClosed(true);
+    }
+  };
 
   const unlockValve = () => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -89,7 +59,6 @@ export default function PipeHealthDashboard() {
     }
   };
 
-  // Cooldown: only log a new event if label changed OR 30 s have passed
   const lastAlertRef = React.useRef({ label: "NORMAL", time: 0 });
 
   useEffect(() => {
@@ -107,11 +76,8 @@ export default function PipeHealthDashboard() {
         try {
           const r = JSON.parse(e.data);
 
-          // Track valve state from Arduino
           if (r.valveClosed !== undefined) setValveClosed(r.valveClosed);
           if (r.event === "valve" && r.action === "unlocked") setValveClosed(false);
-
-          // Skip non-sensor events (boot, valve messages)
           if (r.lpm1 === undefined) return;
 
           const risk = assessRisk(r.lpm1, r.lpm2);
@@ -120,14 +86,11 @@ export default function PipeHealthDashboard() {
             lpm1:  r.lpm1,
             lpm2:  r.lpm2,
             diff:  risk.diff,
-            score: risk.score,
             label: risk.label,
-            temp:  r.temp ?? 0,
           };
 
           setReadings(prev => [...prev.slice(-59), reading]);
 
-          // Event log with cooldown
           if (risk.label !== "NORMAL") {
             const now = Date.now();
             const last = lastAlertRef.current;
@@ -172,35 +135,51 @@ export default function PipeHealthDashboard() {
       {/* Header */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 8 }}>
         <div>
-          <p style={{ margin: 0, fontSize: 11, color: "#888", textTransform: "uppercase", letterSpacing: "0.08em" }}>Pipe health monitor</p>
+          <p style={{ margin: 0, fontSize: 24, color: "#888", letterSpacing: "0.08em" }}>WaterShield Alerts</p>
           <p style={{ margin: 0, fontSize: 20, fontWeight: 500 }}>Live sensor dashboard</p>
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+
           {/* Valve status badge */}
           <span style={{
-            fontSize: 12, padding: "4px 12px", borderRadius: 20,
+            fontSize: 15, padding: "7px 16px", borderRadius: 20,
             background: valveClosed ? "rgba(226,75,74,0.10)" : "rgba(29,158,117,0.10)",
             color:      valveClosed ? "#e24b4a" : "#1d9e75",
-            border:    `1px solid ${valveClosed ? "#e24b4a40" : "#1d9e7540"}`
+            border:    `1px solid ${valveClosed ? "#e24b4a40" : "#1d9e7540"}`,
+            fontWeight: 500,
           }}>
             {valveClosed ? "🔒 Valve closed" : "✅ Valve open"}
           </span>
-          {/* Unlock button — only shown when valve is closed */}
+
+          {/* Unlock button — only when valve is closed */}
           {valveClosed && (
             <button onClick={unlockValve} style={{
-              fontSize: 12, padding: "4px 14px", borderRadius: 20, cursor: "pointer",
+              fontSize: 15, padding: "7px 18px", borderRadius: 20, cursor: "pointer",
               background: "#fff", color: "#185fa5",
               border: "1px solid #185fa5", fontWeight: 500,
             }}>
               🔓 Unlock valve
             </button>
           )}
+
+          {/* Manual close button — only when valve is open */}
+          {!valveClosed && (
+            <button onClick={closeValve} style={{
+              fontSize: 15, padding: "7px 18px", borderRadius: 20, cursor: "pointer",
+              background: "#fff", color: "#e24b4a",
+              border: "1px solid #e24b4a", fontWeight: 500,
+            }}>
+              🔒 Close valve
+            </button>
+          )}
+
           {/* Connection badge */}
           <span style={{
-            fontSize: 12, padding: "4px 12px", borderRadius: 20,
+            fontSize: 15, padding: "7px 16px", borderRadius: 20,
             background: connected ? "rgba(29,158,117,0.10)" : "rgba(226,75,74,0.10)",
             color:      connected ? "#1d9e75" : "#e24b4a",
-            border:    `1px solid ${connected ? "#1d9e7540" : "#e24b4a40"}`
+            border:    `1px solid ${connected ? "#1d9e7540" : "#e24b4a40"}`,
+            fontWeight: 500,
           }}>
             {connected ? "● Connected" : "○ Waiting for ESP32..."}
           </span>
@@ -210,7 +189,7 @@ export default function PipeHealthDashboard() {
       {/* No data banner */}
       {readings.length === 0 && (
         <div style={{ padding: 16, marginBottom: 16, borderRadius: 8, background: "rgba(239,159,39,0.10)", border: "1px solid #ef9f2740", fontSize: 13, color: "#ba7517" }}>
-          Waiting for data from ESP32… Make sure serial_bridge.py is running and the board is on COM8.
+          Waiting for data from ESP32… Make sure serial_bridge.py is running and the board is connected.
         </div>
       )}
 
@@ -221,7 +200,7 @@ export default function PipeHealthDashboard() {
           <div>
             <p style={{ margin: 0, fontWeight: 600, color: col, fontSize: 14 }}>{riskLabel(latest.label)}</p>
             <p style={{ margin: 0, fontSize: 12, color: "#666" }}>
-              Flow diff: {latest.diff?.toFixed(3)} L/min &nbsp;·&nbsp; Risk: {Math.round((latest.score ?? 0) * 100)}%
+              Flow diff: {latest.diff?.toFixed(3)} L/min
             </p>
           </div>
         </div>
@@ -230,12 +209,10 @@ export default function PipeHealthDashboard() {
       {/* Metric cards */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10, marginBottom: 16 }}>
         {[
-          { label: "Status",      value: riskLabel(latest.label || "NORMAL"),                                    color: col,    background: bg },
-          { label: "Sensor 1",    value: latest.lpm1 != null ? `${latest.lpm1.toFixed(3)} L/min` : "–",         color: "#111", background: "#f5f5f5" },
-          { label: "Sensor 2",    value: latest.lpm2 != null ? `${latest.lpm2.toFixed(3)} L/min` : "–",         color: "#111", background: "#f5f5f5" },
-          { label: "Flow diff",   value: latest.diff  != null ? `${latest.diff.toFixed(3)} L/min` : "–",        color: "#111", background: "#f5f5f5" },
-          { label: "Risk score",  value: latest.score != null ? `${Math.round(latest.score * 100)}%` : "–",     color: col,    background: "#f5f5f5" },
-          { label: "Temperature", value: latest.temp  && latest.temp !== 0 ? `${latest.temp} °C` : "–",         color: "#111", background: "#f5f5f5" },
+          { label: "Status",    value: riskLabel(latest.label || "NORMAL"),                              color: col,    background: bg },
+          { label: "Sensor 1",  value: latest.lpm1 != null ? `${latest.lpm1.toFixed(3)} L/min` : "–",  color: "#111", background: "#f5f5f5" },
+          { label: "Sensor 2",  value: latest.lpm2 != null ? `${latest.lpm2.toFixed(3)} L/min` : "–",  color: "#111", background: "#f5f5f5" },
+          { label: "Flow diff", value: latest.diff  != null ? `${latest.diff.toFixed(3)} L/min` : "–", color: col,    background: bg },
         ].map(({ label, value, color, background }) => (
           <div key={label} style={{ background, borderRadius: 8, padding: "10px 14px", border: "1px solid #e5e5e5" }}>
             <p style={{ margin: "0 0 4px", fontSize: 11, color: "#888", textTransform: "uppercase" }}>{label}</p>
@@ -244,29 +221,15 @@ export default function PipeHealthDashboard() {
         ))}
       </div>
 
-      {/* Charts */}
+      {/* Flow rates chart */}
       <div style={{ background: "#fff", border: "1px solid #e5e5e5", borderRadius: 10, padding: "14px 16px", marginBottom: 16 }}>
-        <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-          {["flow", "alert"].map(tab => (
-            <button key={tab} onClick={() => setActiveTab(tab)} style={{
-              fontSize: 12, padding: "4px 12px", borderRadius: 5,
-              border: "1px solid #ccc",
-              background: activeTab === tab ? "#eee" : "#fff",
-              cursor: "pointer",
-              fontWeight: activeTab === tab ? 500 : 400
-            }}>
-              {tab === "flow" ? "Flow rates" : "Diff & risk"}
-            </button>
-          ))}
-        </div>
-
+        <p style={{ margin: "0 0 12px", fontSize: 12, fontWeight: 500, color: "#555", textTransform: "uppercase" }}>Flow rates</p>
         {readings.length === 0 ? (
-          <div style={{ height: 220, display: "flex", alignItems: "center", justifyContent: "center", color: "#aaa", fontSize: 13 }}>
+          <div style={{ height: 200, display: "flex", alignItems: "center", justifyContent: "center", color: "#aaa", fontSize: 13 }}>
             No data yet — waiting for ESP32
           </div>
-        ) : activeTab === "flow" ? (
-          // ── Flow rates ────────────────────────────────────────────────────
-          <ResponsiveContainer width="100%" height={220}>
+        ) : (
+          <ResponsiveContainer width="100%" height={200}>
             <LineChart data={readings} margin={{ top: 4, right: 8, bottom: 0, left: -20 }}>
               <CartesianGrid strokeDasharray="2 4" stroke="#eee" />
               <XAxis hide />
@@ -276,59 +239,43 @@ export default function PipeHealthDashboard() {
               <Line type="monotone" dataKey="lpm2" stroke="#0f6e56" dot={false} strokeWidth={1.5} name="Sensor 2" strokeDasharray="4 2" />
             </LineChart>
           </ResponsiveContainer>
+        )}
+        <div style={{ display: "flex", gap: 16, marginTop: 8, fontSize: 11, color: "#888" }}>
+          <span style={{ color: "#185fa5" }}>— Sensor 1</span>
+          <span style={{ color: "#0f6e56" }}>- - Sensor 2</span>
+          <span style={{ marginLeft: "auto" }}>Last 60 seconds</span>
+        </div>
+      </div>
+
+      {/* Flow difference chart */}
+      <div style={{ background: "#fff", border: "1px solid #e5e5e5", borderRadius: 10, padding: "14px 16px", marginBottom: 16 }}>
+        <p style={{ margin: "0 0 12px", fontSize: 12, fontWeight: 500, color: "#555", textTransform: "uppercase" }}>Flow difference</p>
+        {readings.length === 0 ? (
+          <div style={{ height: 160, display: "flex", alignItems: "center", justifyContent: "center", color: "#aaa", fontSize: 13 }}>
+            No data yet — waiting for ESP32
+          </div>
         ) : (
-          // ── Diff + Risk panels ────────────────────────────────────────────
-          <div>
-            <p style={{ margin: "0 0 4px", fontSize: 11, color: "#888", textTransform: "uppercase" }}>Flow difference (L/min)</p>
-            <ResponsiveContainer width="100%" height={100}>
-              <AreaChart data={readings} margin={{ top: 2, right: 8, bottom: 0, left: -20 }}>
-                <CartesianGrid strokeDasharray="2 4" stroke="#eee" />
-                <XAxis hide />
-                <YAxis domain={[0, DIFF_MAX]} tick={{ fontSize: 10 }} />
-                <Tooltip formatter={v => `${Number(v).toFixed(3)} L/min`} labelFormatter={() => ""} />
-                <ReferenceLine y={DIFF_WARN}  stroke="#ef9f27" strokeDasharray="3 3"
-                  label={{ value: `leak ${DIFF_WARN}`, position: "right", fontSize: 9, fill: "#ef9f27" }} />
-                <ReferenceLine y={DIFF_ALERT} stroke="#e24b4a" strokeDasharray="3 3"
-                  label={{ value: `burst ${DIFF_ALERT}`, position: "right", fontSize: 9, fill: "#e24b4a" }} />
-                <Area type="monotone" dataKey="diff" stroke="#185fa5" fill="rgba(24,95,165,0.12)"
-                  dot={false} strokeWidth={1.5} name="Flow diff" isAnimationActive={false} />
-              </AreaChart>
-            </ResponsiveContainer>
-
-            <div style={{ height: 10 }} />
-
-            <p style={{ margin: "0 0 4px", fontSize: 11, color: "#888", textTransform: "uppercase" }}>Risk score</p>
-            <ResponsiveContainer width="100%" height={100}>
-              <AreaChart data={readings} margin={{ top: 2, right: 8, bottom: 0, left: -20 }}>
-                <CartesianGrid strokeDasharray="2 4" stroke="#eee" />
-                <XAxis hide />
-                <YAxis domain={[0, 1]} tickFormatter={v => `${Math.round(v * 100)}%`} tick={{ fontSize: 10 }} />
-                <Tooltip formatter={v => `${(Number(v) * 100).toFixed(1)}%`} labelFormatter={() => ""} />
-                <ReferenceLine y={0.3} stroke="#ef9f27" strokeDasharray="3 3"
-                  label={{ value: "leak 30%",  position: "right", fontSize: 9, fill: "#ef9f27" }} />
-                <ReferenceLine y={0.6} stroke="#e24b4a" strokeDasharray="3 3"
-                  label={{ value: "burst 60%", position: "right", fontSize: 9, fill: "#e24b4a" }} />
-                <Area type="monotone" dataKey="score" stroke="#e24b4a" fill="rgba(226,75,74,0.15)"
-                  dot={<AlertDot />} strokeWidth={1.5} name="Risk" isAnimationActive={false} />
-              </AreaChart>
-            </ResponsiveContainer>
-
-            <div style={{ display: "flex", gap: 16, marginTop: 8, fontSize: 11, color: "#888" }}>
-              <span style={{ color: "#185fa5" }}>— Flow diff</span>
-              <span style={{ color: "#e24b4a" }}>— Risk score</span>
-              <span style={{ color: "#ef9f27" }}>● Leak</span>
-              <span style={{ color: "#e24b4a" }}>● Burst</span>
-              <span style={{ marginLeft: "auto" }}>Last 60 s</span>
-            </div>
-          </div>
+          <ResponsiveContainer width="100%" height={160}>
+            <AreaChart data={readings} margin={{ top: 4, right: 90, bottom: 0, left: -20 }}>
+              <CartesianGrid strokeDasharray="2 4" stroke="#eee" />
+              <XAxis hide />
+              <YAxis domain={[0, DIFF_MAX]} tick={{ fontSize: 10 }} />
+              <Tooltip formatter={v => `${Number(v).toFixed(3)} L/min`} labelFormatter={() => ""} />
+              <ReferenceLine y={DIFF_WARN} stroke="#ef9f27" strokeDasharray="3 3"
+                label={{ value: `leak ${DIFF_WARN} L/min`, position: "right", fontSize: 9, fill: "#ef9f27" }} />
+              <ReferenceLine y={DIFF_ALERT} stroke="#e24b4a" strokeDasharray="3 3"
+                label={{ value: `burst ${DIFF_ALERT} L/min`, position: "right", fontSize: 9, fill: "#e24b4a" }} />
+              <Area type="monotone" dataKey="diff" stroke="#185fa5" fill="rgba(24,95,165,0.12)"
+                dot={false} strokeWidth={1.5} name="Flow diff" isAnimationActive={false} />
+            </AreaChart>
+          </ResponsiveContainer>
         )}
-
-        {activeTab === "flow" && (
-          <div style={{ display: "flex", gap: 16, marginTop: 8, fontSize: 11, color: "#888" }}>
-            <span>— Sensor 1</span><span>- - Sensor 2</span>
-            <span style={{ marginLeft: "auto" }}>Last 60 seconds</span>
-          </div>
-        )}
+        <div style={{ display: "flex", gap: 16, marginTop: 8, fontSize: 11, color: "#888" }}>
+          <span style={{ color: "#185fa5" }}>— Flow difference</span>
+          <span style={{ color: "#ef9f27" }}>— Leak threshold ({DIFF_WARN} L/min)</span>
+          <span style={{ color: "#e24b4a" }}>— Burst threshold ({DIFF_ALERT} L/min)</span>
+          <span style={{ marginLeft: "auto" }}>Last 60 seconds</span>
+        </div>
       </div>
 
       {/* Event log */}
@@ -346,7 +293,7 @@ export default function PipeHealthDashboard() {
                 {riskLabel(a.label)}
               </span>
               <span style={{ color: "#888", marginLeft: "auto" }}>
-                ΔQ: {a.diff.toFixed(3)} L/min · risk {Math.round(a.score * 100)}%
+                ΔQ: {a.diff.toFixed(3)} L/min
               </span>
             </div>
           ))
@@ -355,7 +302,7 @@ export default function PipeHealthDashboard() {
 
       {/* Threshold legend */}
       <div style={{ marginTop: 12, padding: "10px 14px", borderRadius: 8, background: "#f9f9f9", border: "1px solid #e5e5e5", fontSize: 11, color: "#888" }}>
-        Thresholds — leak: ΔQ &gt; {DIFF_WARN} L/min &nbsp;·&nbsp; burst: ΔQ &gt; {DIFF_ALERT} L/min or 2× flow spike &nbsp;·&nbsp; flow risk: max sensor &gt; {FLOW_HIGH} L/min (caps at 50%) &nbsp;·&nbsp; boost ×{RISK_BOOST}
+        Thresholds — leak: ΔQ &gt; {DIFF_WARN} L/min &nbsp;·&nbsp; burst: ΔQ &gt; {DIFF_ALERT} L/min
       </div>
     </div>
   );
