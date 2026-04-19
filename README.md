@@ -94,10 +94,9 @@ Edit these constants at the top of `leak-alerts.js`:
 | Constant | Default | Purpose |
 |---|---|---|
 | `BRIDGE_URL` | `ws://localhost:8765` | Where to find the sensor WebSocket |
-| `COOLDOWN_SECONDS` | `30` | Min seconds between repeat alerts of same severity |
-| `DIFF_WARN` | `0.3` | Flow diff (L/min) to enter LEAK state |
-| `DIFF_ALERT` | `0.5` | Flow diff (L/min) for higher urgency |
-| `BURST_RATIO` | `2.0` | Rolling-avg multiplier that counts as a burst |
+| `COOLDOWN_SECONDS` | `1` | Min seconds between repeat alerts of same severity (1 for testing purposes) |
+| `LEAK_ALERT` | `0.2` | Flow diff (L/min) to enter LEAK state |
+| `BURST_ALERT` | `0.4` | Flow diff (L/min) to enter BURST state |
 
 ## Platform swap
 
