@@ -27,9 +27,8 @@ The same WebSocket feeds the React dashboard, so the alerts service runs in para
 
 | Category | Trigger | Example message |
 |---|---|---|
-| `LEAK_LOW` | Flow diff > 0.3 L/min, risk score < 60% | 💧 Possible leak — monitoring |
-| `LEAK_HIGH` | Flow diff > 0.3 L/min, risk score ≥ 60% | ⚠️ Leak confirmed — recommend inspection |
-| `BURST` | Sensor spike > 2× rolling average | 🚨 Burst detected — valve closing |
+| `LEAK` | Flow Rate Difference > 0.2 | ⚠️ Leak confirmed — recommend inspection |
+| `BURST` | Flow Rate Difference > 0.4 | 🚨 Burst detected — valve closing |
 
 Thresholds are defined at the top of `leak-alerts.js` and match the dashboard's `assessRisk()` function.
 
